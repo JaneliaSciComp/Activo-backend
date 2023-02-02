@@ -1,7 +1,12 @@
+import json
+import os
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from zarr.storage import FSStore
+
 from .utils import *
 
 description = """
@@ -83,7 +88,7 @@ class App(FastAPI):
         async def deploy_data(request: PostDeployDataRequest):
             print(f"DeployDataRequest: {request}")
             if request.proposed_name in self._deployed_data:
-                raise HTTPException(status_code=400,
+                raise HTTPException(status_code=404,
                                     detail="Already exist")
             try:
                 reader = create_kleio_dataset_reader(request.index_folder,
@@ -91,7 +96,7 @@ class App(FastAPI):
                 self._deployed_data[request.proposed_name] = DeployedData(request, reader)
                 return {"name": request.proposed_name}
             except Exception as ex:
-                raise HTTPException(status_code=400,
+                raise HTTPException(status_code=404,
                                     detail=f"can't create reader: {ex}")
 
         # Check if data exists, if yes return the deployment name
@@ -103,46 +108,87 @@ class App(FastAPI):
                     if value == request:
                         return {"name": value.name}
             except Exception as ex:
-                raise HTTPException(status_code=400,
+                raise HTTPException(status_code=404,
                                     detail=f"Error: {ex}")
-            raise HTTPException(status_code=400,
+            raise HTTPException(status_code=404,
                                 detail="Don't exist")
 
-        @self.get("/data/{path:path}")
-        async def get_data(path: str):
-            print(f"Get data {path}")
-            elms = path.split("/")
-            if len(elms) <= 1:
-                raise HTTPException(status_code=400,
-                                    detail="Need to specify element")
-            name = elms[0]
+        # No dataset specified so Group metadata .zgroup
+        @self.get("/data/{name}/attributes.json")
+        def get_attributes(name: str) -> dict:
             if name not in self._deployed_data:
-                raise HTTPException(status_code=400,
+                raise HTTPException(status_code=404,
                                     detail="Don't exist")
+            index_folder = self._deployed_data[name].kv_folder
+            store = FSStore(index_folder)
+            return json.loads(store["attributes.json"].decode())
+            # return Response(bytes(store["attributes.json"].decode(), 'utf-8'), media_type='binary/octet-stream')
 
-            reader = self._deployed_data[name].reader
-            rest_path = "/".join(elms[1:])
-            print(f"Got reader {reader}")
-            print(f"Rest path {rest_path}")
-            return reader[rest_path]
+        @self.get("/data/{name}/{path:path}/attributes.json")
+        def get_dataset_attributes(name: str, path: str) -> dict:
+            if name not in self._deployed_data:
+                raise HTTPException(status_code=404,
+                                    detail="Don't exist")
+            index_folder = self._deployed_data[name].kv_folder
+            store = FSStore(index_folder)
+            path_new = os.path.join(path, "attributes.json")
+            return format_array_meta_fix_n5(json.loads(store[path_new].decode()))
 
-        @self.get("/data/lazy/{path:path}")
-        async def get_lazy_prediction_data(path: str):
-            print(f"path {path}")
-            return {"status": "success"}
+        @self.get("/data/{name}/{path:path}/{chunk_key}")
+        def get_chunk(
+                name: str, path: str, chunk_key: str) -> bytes:
 
-        @self.post("/data/annotation/{path:path}")
-        async def post_annotation_data(path: str):
-            print(f"path {path}")
-            return {"status": "success"}
+            print(f"Getting chunk: {path}")
+            path_new = format_chunk_n5_to_zarr_key(os.path.join(path, chunk_key))
+            print(f"formatted_path: {path_new}")
+            print(f'Host: {name}, Path: {path}')
+            store = self._get_store(data=name)
+            # try:
+            data = store[path_new]
+            # application/octet-stream
 
-        # @app.get("/")
-        # async def root():
-        #     return {"message": "Hello World"}
+            return Response(data, media_type='binary/octet-stream')
+            # except Exception as ex:
+            #     raise HTTPException(status_code=404,
+            #                         detail=f"Error: {ex}")
 
-        @self.get("/data/")
-        async def root():
-            return {"message": "Hello World"}
+        # @self.get("/data/{name}/{path:path}")
+        # async def get_data(name: str, path: str):
+        #     print(f" data {name} - path {path}")
+        #
+        #     # if len(elms) <= 1:
+        #     #     raise HTTPException(status_code=404,
+        #     #                         detail="Need to specify element")
+        #     name = elms[0]
+        #     if name not in self._deployed_data:
+        #         raise HTTPException(status_code=404,
+        #                             detail="Don't exist")
+        #
+        #     reader = self._deployed_data[name].reader
+        #     rest_path = "/".join(elms[1:])
+        #     print(f"Got reader {reader}")
+        #     print(f"Rest path {rest_path}")
+        #     result = reader[rest_path]
+        #     if isinstance(result, str):
+        #         return json_loads(result)
+        #     else:
+        #         return result
+
+        # @self.get("/data/lazy/{path:path}")
+        # async def get_lazy_prediction_data(path: str):
+        #     print(f"path {path}")
+        #     return {"status": "success"}
+        #
+        # @self.post("/data/annotation/{path:path}")
+        # async def post_annotation_data(path: str):
+        #     print(f"path {path}")
+        #     return {"status": "success"}
+
+    def _get_store(self, data):
+        if data not in self._deployed_data:
+            raise HTTPException(status_code=404,
+                                detail="Don't exist")
+        return self._deployed_data[data].reader
 
 
 def start():
