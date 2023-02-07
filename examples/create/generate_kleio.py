@@ -22,7 +22,7 @@ index_store = ZarrIndexStore(path_index)
 store = VersionedFSStore(index_store, path, auto_mkdir=True)
 # TODO fix axes
 z = zarr.open(store, mode="a")
-z.create_dataset("test", shape=(10, 1000, 1000), chunks=(128, 128, 128), dtype= "u1")
+z.create_dataset("test", shape=(1000, 1000, 10), chunks=(128, 128, 128), dtype= "u1")
 x = z["test"]
 # all = x[:]
 # print("type: {}: ".format(type(z["test"])))
@@ -33,7 +33,10 @@ print("set dataset")
 # x[0:60, :, 1:10] = 120
 # x[100:300,:, 2:15] = 200
 
-x[:, 0:400, 500:900] = 200
+x[:, :, :] = 200
+
+x[0:500, 0:400, :] = 50
+# x[:, :, :] = 200
 
 # x[0:60, 200:400, 1:10] = 120
 # x[100:300, 100:150, 2:15] = 200

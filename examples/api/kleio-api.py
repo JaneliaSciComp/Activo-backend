@@ -4,6 +4,7 @@ import zarr
 from flask import Flask
 from flask import request
 from zarr.n5 import invert_chunk_coords
+
 app = Flask(__name__)
 
 from flask_cors import CORS
@@ -52,7 +53,7 @@ def catch_all(path: str):
     print(f"getting: {path}")
     path = format_key(invert_chunk_coords(format_key(path)))
     print(f"after format: {path}")
-    if "0.3.2" in path :
+    if "0.3.2" in path:
         print("hi1")
 
     if "2.3.0" in path:
