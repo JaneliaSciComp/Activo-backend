@@ -1,12 +1,14 @@
 import json
-import os
+from enum import Enum
 
 import uvicorn
+import zarr
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from kleio.stores import VersionedFSStore, N5FSIndexStore
 from pydantic import BaseModel
-from zarr.storage import FSStore
-
+from zarr.n5 import N5FSStore
+from starlette.responses import Response
 from .utils import *
 
 description = """
@@ -31,21 +33,30 @@ class ActiveBaseModel(BaseModel):
         orm_mode = True
 
 
+class DataType(str, Enum):
+    n5 = "n5"
+    zarr = "zarr"
+    kleio = "kleio"
+
+
+# TODO extends from GET
 class PostDeployDataRequest(ActiveBaseModel):
     index_folder: str
-    kv_folder: str
+    kv_folder: str = None
     proposed_name: str
+    data_type: DataType
 
 
 class GetDeployedDataRequest(ActiveBaseModel):
     index_folder: str
-    kv_folder: str
+    kv_folder: str = None
 
 
 class DeployedData:
     def __init__(self, request: PostDeployDataRequest, reader) -> None:
         self.index_folder = request.index_folder
         self.kv_folder = request.kv_folder
+        self.data_type = request.data_type
         self.name = request.proposed_name
         self.reader = reader
 
@@ -55,6 +66,22 @@ class DeployedData:
         if self.kv_folder != o.kv_folder:
             return False
         return True
+
+
+def create_reader(request: PostDeployDataRequest):
+    data_type = request.data_type
+    if data_type == DataType.n5:
+        return N5FSStore(request.index_folder)
+    elif data_type == DataType.zarr:
+        return zarr.open(request.index_folder).store
+    elif data_type == DataType.kleio:
+        if request.kv_folder is None:
+            raise Exception("Kleio store needs KV path!")
+        index_store = N5FSIndexStore(request.index_folder)
+        store = VersionedFSStore(index_store, request.kv_folder)
+        return store
+    else:
+        raise Exception(f"DataType {request.data_type} is not implemented!")
 
 
 class App(FastAPI):
@@ -91,8 +118,7 @@ class App(FastAPI):
                 raise HTTPException(status_code=404,
                                     detail="Already exist")
             try:
-                reader = create_kleio_dataset_reader(request.index_folder,
-                                                     request.kv_folder)
+                reader = create_reader(request)
                 self._deployed_data[request.proposed_name] = DeployedData(request, reader)
                 return {"name": request.proposed_name}
             except Exception as ex:
@@ -113,66 +139,38 @@ class App(FastAPI):
             raise HTTPException(status_code=404,
                                 detail="Don't exist")
 
-        # No dataset specified so Group metadata .zgroup
-        @self.get("/data/{name}/attributes.json")
-        def get_attributes(name: str) -> dict:
+        @self.get("/data/{name}/{path:path}")
+        async def get_kleio_data(name: str, path: str):
+            print(f" data {name} - path {path}")
+
             if name not in self._deployed_data:
                 raise HTTPException(status_code=404,
                                     detail="Don't exist")
-            index_folder = self._deployed_data[name].kv_folder
-            store = FSStore(index_folder)
-            return json.loads(store["attributes.json"].decode())
-            # return Response(bytes(store["attributes.json"].decode(), 'utf-8'), media_type='binary/octet-stream')
+            try:
+                reader = self._deployed_data[name].reader
+                data_type = self._deployed_data[name].data_type
 
-        @self.get("/data/{name}/{path:path}/attributes.json")
-        def get_dataset_attributes(name: str, path: str) -> dict:
-            if name not in self._deployed_data:
+                print(f"Got reader {reader}")
+
+                is_chunk = False
+                last_element = path.split("/")[-1]
+
+                if last_element.isdigit() or last_element.split(".")[-1].isdigit():
+                    print("is chunk")
+                    is_chunk = True
+
+                if is_chunk:
+                    if data_type is DataType.kleio:
+                        path = format_chunk_n5_to_zarr_key(path)
+                    result = reader[path]
+                    return Response(result, media_type='binary/octet-stream')
+                else:
+                    result = reader[path]
+                    print(f"Got result {result}")
+                    return json.loads(result.decode())
+            except Exception as e:
                 raise HTTPException(status_code=404,
-                                    detail="Don't exist")
-            index_folder = self._deployed_data[name].kv_folder
-            store = FSStore(index_folder)
-            path_new = os.path.join(path, "attributes.json")
-            return format_array_meta_fix_n5(json.loads(store[path_new].decode()))
-
-        @self.get("/data/{name}/{path:path}/{chunk_key}")
-        def get_chunk(
-                name: str, path: str, chunk_key: str) -> bytes:
-
-            print(f"Getting chunk: {path}")
-            path_new = format_chunk_n5_to_zarr_key(os.path.join(path, chunk_key))
-            print(f"formatted_path: {path_new}")
-            print(f'Host: {name}, Path: {path}')
-            store = self._get_store(data=name)
-            # try:
-            data = store[path_new]
-            # application/octet-stream
-
-            return Response(data, media_type='binary/octet-stream')
-            # except Exception as ex:
-            #     raise HTTPException(status_code=404,
-            #                         detail=f"Error: {ex}")
-
-        # @self.get("/data/{name}/{path:path}")
-        # async def get_data(name: str, path: str):
-        #     print(f" data {name} - path {path}")
-        #
-        #     # if len(elms) <= 1:
-        #     #     raise HTTPException(status_code=404,
-        #     #                         detail="Need to specify element")
-        #     name = elms[0]
-        #     if name not in self._deployed_data:
-        #         raise HTTPException(status_code=404,
-        #                             detail="Don't exist")
-        #
-        #     reader = self._deployed_data[name].reader
-        #     rest_path = "/".join(elms[1:])
-        #     print(f"Got reader {reader}")
-        #     print(f"Rest path {rest_path}")
-        #     result = reader[rest_path]
-        #     if isinstance(result, str):
-        #         return json_loads(result)
-        #     else:
-        #         return result
+                                    detail=f"error {e}")
 
         # @self.get("/data/lazy/{path:path}")
         # async def get_lazy_prediction_data(path: str):
@@ -193,4 +191,4 @@ class App(FastAPI):
 
 def start():
     app = App()
-    uvicorn.run(app, host="127.0.0.1", port=5000, log_level="info")
+    return uvicorn.run(app, host="127.0.0.1", port=5000, log_level="info")
