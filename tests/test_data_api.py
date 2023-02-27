@@ -1,6 +1,6 @@
 import unittest
 from fastapi.testclient import TestClient
-from activo.data.start import App
+from app.main import App
 import tempfile
 import os
 from .utils import *

@@ -1,0 +1,3 @@
+#mongodbhost: mongodb://dbuser:dbpass@dburl:dbport/
+#mongodbname: dacapo
+runs_base_dir: /Users/zouinkhim/Desktop/tmp/dacapo_models
